@@ -10,6 +10,7 @@ use crate::hash::AddressHash;
 use crate::hash::ADDRESS_HASH_SIZE;
 use crate::identity::EmptyIdentity;
 use crate::packet::DestinationType;
+use crate::packet::ContextFlag;
 use crate::packet::Header;
 use crate::packet::HeaderType;
 use crate::packet::IfacFlag;
@@ -133,6 +134,7 @@ impl PathRequests {
             header: Header {
                 ifac_flag: IfacFlag::Open,
                 header_type: HeaderType::Type1,
+                context_flag: ContextFlag::Unset,
                 propagation_type: PropagationType::Broadcast,
                 destination_type: DestinationType::Plain,
                 packet_type: PacketType::Data,

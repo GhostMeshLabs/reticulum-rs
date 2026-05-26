@@ -953,6 +953,26 @@ async fn handle_announce<'a>(
         return;
     }
 
+    log::trace!(
+        "tp({}): rx announce dst={} iface={} header={:?} context_flag={:?} propagation={:?} \
+dest_type={:?} ctx={:?} packet_hops={} transport={} transport_matches_destination={} hash={}",
+        handler.config.name,
+        packet.destination,
+        iface,
+        packet.header.header_type,
+        packet.header.context_flag,
+        packet.header.propagation_type,
+        packet.header.destination_type,
+        packet.context,
+        packet.header.hops,
+        packet
+            .transport
+            .map(|transport| transport.to_string())
+            .unwrap_or_else(|| "None".to_owned()),
+        packet.transport == Some(packet.destination),
+        packet.hash(),
+    );
+
     if let Ok(result) = DestinationAnnounce::validate(packet) {
         let destination = result.0;
         let app_data = result.1;
@@ -1346,6 +1366,7 @@ fn create_retransmit_packet(packet: &Packet) -> Packet {
         header: Header {
             ifac_flag: packet.header.ifac_flag,
             header_type: packet.header.header_type,
+            context_flag: packet.header.context_flag,
             propagation_type: packet.header.propagation_type,
             destination_type: packet.header.destination_type,
             packet_type: packet.header.packet_type,

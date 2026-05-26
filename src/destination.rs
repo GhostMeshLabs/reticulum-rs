@@ -12,7 +12,7 @@ use crate::{
     hash::{AddressHash, Hash},
     identity::{EmptyIdentity, HashIdentity, Identity, PrivateIdentity, PUBLIC_KEY_LENGTH},
     packet::{
-        self, DestinationType, Header, HeaderType, IfacFlag, Packet, PacketContext,
+        self, ContextFlag, DestinationType, Header, HeaderType, IfacFlag, Packet, PacketContext,
         PacketDataBuffer, PacketType, PropagationType,
     },
 };
@@ -284,6 +284,7 @@ impl Destination<PrivateIdentity, Input, Single> {
             header: Header {
                 ifac_flag: IfacFlag::Open,
                 header_type: HeaderType::Type1,
+                context_flag: ContextFlag::Unset,
                 propagation_type: PropagationType::Broadcast,
                 destination_type: DestinationType::Single,
                 packet_type: PacketType::Announce,

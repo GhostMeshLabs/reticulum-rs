@@ -2,7 +2,7 @@ use std::{collections::HashMap, time::Instant};
 
 use crate::{
     hash::{AddressHash, Hash},
-    packet::{DestinationType, Header, HeaderType, IfacFlag, Packet, PacketType},
+    packet::{DestinationType, Header, HeaderType, IfacFlag, Packet, PacketType, PropagationType},
 };
 
 pub struct PathEntry {
@@ -60,6 +60,26 @@ impl PathTable {
         }
 
         let received_from = transport_id.unwrap_or(announce.destination);
+        let direct_announce = transport_id.is_none();
+        let self_referential_transport = transport_id == Some(announce.destination);
+
+        log::trace!(
+            "path_table install destination={} iface={} context_flag={:?} packet_hops={} \
+installed_hops={} transport_id={} next_hop={} direct_announce={} \
+self_referential_transport={}",
+            announce.destination,
+            iface,
+            announce.header.context_flag,
+            announce.header.hops,
+            hops,
+            transport_id
+                .map(|transport| transport.to_string())
+                .unwrap_or_else(|| "None".to_owned()),
+            received_from,
+            direct_announce,
+            self_referential_transport,
+        );
+
         let new_entry = PathEntry {
             timestamp: Instant::now(),
             received_from,
@@ -95,6 +115,7 @@ impl PathTable {
                 header: Header {
                     ifac_flag: IfacFlag::Open,
                     header_type: HeaderType::Type2,
+                    propagation_type: PropagationType::Transport,
                     hops: original_packet.header.hops + 1,
                     .. original_packet.header
                 },
@@ -138,6 +159,7 @@ impl PathTable {
             Packet {
                 header: Header {
                     header_type: HeaderType::Type2,
+                    propagation_type: PropagationType::Transport,
                     .. original_packet.header
                 },
                 ifac: original_packet.ifac,

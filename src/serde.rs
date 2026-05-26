@@ -105,8 +105,8 @@ mod tests {
         buffer::{InputBuffer, OutputBuffer, StaticBuffer},
         hash::AddressHash,
         packet::{
-            DestinationType, Header, HeaderType, IfacFlag, Packet, PacketContext, PacketType,
-            PropagationType, PACKET_MDU, RETICULUM_MTU,
+            ContextFlag, DestinationType, Header, HeaderType, IfacFlag, Packet, PacketContext,
+            PacketType, PropagationType, PACKET_MDU, RETICULUM_MTU,
         },
     };
 
@@ -122,6 +122,7 @@ mod tests {
             header: Header {
                 ifac_flag: IfacFlag::Open,
                 header_type: HeaderType::Type1,
+                context_flag: ContextFlag::Unset,
                 propagation_type: PropagationType::Broadcast,
                 destination_type: DestinationType::Single,
                 packet_type: PacketType::Announce,
@@ -149,6 +150,7 @@ mod tests {
             header: Header {
                 ifac_flag: IfacFlag::Open,
                 header_type: HeaderType::Type1,
+                context_flag: ContextFlag::Set,
                 propagation_type: PropagationType::Broadcast,
                 destination_type: DestinationType::Single,
                 packet_type: PacketType::Announce,
@@ -177,6 +179,31 @@ mod tests {
     }
 
     #[test]
+    fn header_meta_preserves_context_and_propagation_bits() {
+        let header = Header {
+            ifac_flag: IfacFlag::Open,
+            header_type: HeaderType::Type2,
+            context_flag: ContextFlag::Set,
+            propagation_type: PropagationType::Transport,
+            destination_type: DestinationType::Single,
+            packet_type: PacketType::Data,
+            hops: 4,
+        };
+
+        let mut output_data = [0u8; 8];
+        let mut buffer = OutputBuffer::new(&mut output_data);
+        header.serialize(&mut buffer).expect("serialized header");
+
+        assert_eq!(buffer.as_slice()[0], 0b01110000);
+        assert_eq!(buffer.as_slice()[1], 4);
+
+        let mut input_buffer = InputBuffer::new(buffer.as_slice());
+        let decoded = Header::deserialize(&mut input_buffer).expect("deserialized header");
+
+        assert_eq!(decoded, header);
+    }
+
+    #[test]
     fn serialized_packet_fits_reticulum_mtu() {
         let mut output_data = [0u8; RETICULUM_MTU];
         let mut buffer = OutputBuffer::new(&mut output_data);
@@ -185,7 +212,8 @@ mod tests {
             header: Header {
                 ifac_flag: IfacFlag::Open,
                 header_type: HeaderType::Type2,
-                propagation_type: PropagationType::Broadcast,
+                context_flag: ContextFlag::Unset,
+                propagation_type: PropagationType::Transport,
                 destination_type: DestinationType::Single,
                 packet_type: PacketType::Data,
                 hops: 0,

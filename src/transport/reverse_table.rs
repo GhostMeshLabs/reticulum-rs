@@ -3,7 +3,7 @@ use tokio::time::{Duration, Instant};
 
 use crate::{
     hash::AddressHash,
-    packet::{Header, HeaderType, IfacFlag, Packet},
+    packet::{Header, HeaderType, IfacFlag, Packet, PropagationType},
 };
 
 pub struct ReverseEntry {
@@ -17,6 +17,7 @@ fn send_backwards(packet: &Packet, entry: &ReverseEntry) -> (Packet, AddressHash
         header: Header {
             ifac_flag: IfacFlag::Open,
             header_type: HeaderType::Type2,
+            propagation_type: PropagationType::Transport,
             hops: packet.header.hops + 1,
             ..packet.header
         },
