@@ -250,6 +250,7 @@ impl Link {
 
         let packet = Packet {
             header: Header {
+                destination_type: DestinationType::Link,
                 packet_type: PacketType::Proof,
                 ..Default::default()
             },
@@ -641,5 +642,34 @@ fn validate_message_proof(
         Ok(Hash::new(hash_slice.try_into().unwrap()))
     } else {
         Err(RnsError::IncorrectSignature)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rand_core::OsRng;
+
+    use crate::destination::{DestinationName, SingleInputDestination};
+    use crate::identity::PrivateIdentity;
+    use crate::packet::{DestinationType, PacketContext, PacketType};
+
+    use super::Link;
+
+    #[test]
+    fn prove_emits_lrproof_with_link_destination_type() {
+        let identity = PrivateIdentity::new_from_rand(OsRng);
+        let destination = SingleInputDestination::new(
+            identity,
+            DestinationName::new("example_utilities", "link.prove"),
+        );
+        let (event_tx, _) = tokio::sync::broadcast::channel(1);
+        let mut link = Link::new(destination.desc, event_tx);
+
+        let proof = link.prove();
+
+        assert_eq!(proof.header.destination_type, DestinationType::Link);
+        assert_eq!(proof.header.packet_type, PacketType::Proof);
+        assert_eq!(proof.context, PacketContext::LinkRequestProof);
+        assert_eq!(proof.destination, link.id);
     }
 }
