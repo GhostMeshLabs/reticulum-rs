@@ -239,9 +239,17 @@ async fn message_proof_over_remote_link() {
         .await;
     let dest_c_hash = dest_c.lock().await.desc.address_hash;
 
+    let mut announces_a = transport_a.recv_announces().await;
+
+    time::sleep(Duration::from_secs(2)).await;
     transport_c.send_announce(&dest_c, None).await;
 
-    transport_a.recv_announces().await.recv().await.unwrap();
+    tokio::select! {
+        _ = announces_a.recv() => {},
+        _ = time::sleep(Duration::from_secs(10)) => {
+            unreachable!("Timeout. Expected announce was not received");
+        },
+    }
     let link = transport_a.link(dest_c.lock().await.desc).await;
     let link_id = link.lock().await.id().clone();
 
