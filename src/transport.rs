@@ -1102,7 +1102,7 @@ is_path_response={}",
                     propagation_type: PropagationType::Transport,
                     destination_type: DestinationType::Single,
                     packet_type: PacketType::Announce,
-                    hops: packet.header.hops + 1,
+                    hops: packet.header.hops.saturating_add(1),
                 },
                 ifac: None,
                 destination: packet.destination,
@@ -1144,7 +1144,11 @@ is_path_response={}",
 
         if is_discovery_destination(&dest_desc) {
             if let Ok(discovered) =
-                DiscoveredInterface::from_announce(dest_desc, packet.header.hops + 1, app_data)
+                DiscoveredInterface::from_announce(
+                    dest_desc,
+                    packet.header.hops.saturating_add(1),
+                    app_data,
+                )
             {
                 let _ = handler.discovery_tx.send(discovered);
             }
@@ -1490,7 +1494,7 @@ fn create_retransmit_packet(packet: &Packet) -> Packet {
             propagation_type: packet.header.propagation_type,
             destination_type: packet.header.destination_type,
             packet_type: packet.header.packet_type,
-            hops: packet.header.hops + 1,
+            hops: packet.header.hops.saturating_add(1),
         },
         ifac: packet.ifac,
         destination: packet.destination,

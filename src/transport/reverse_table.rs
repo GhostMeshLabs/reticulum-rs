@@ -14,7 +14,7 @@ pub struct ReverseEntry {
 fn send_backwards(packet: &Packet, entry: &ReverseEntry) -> (Packet, AddressHash) {
     let propagated = Packet {
         header: Header {
-            hops: packet.header.hops + 1,
+            hops: packet.header.hops.saturating_add(1),
             ..packet.header
         },
         ifac: None,

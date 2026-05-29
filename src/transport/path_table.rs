@@ -54,7 +54,9 @@ impl PathTable {
         transport_id: Option<AddressHash>,
         iface: AddressHash,
     ) {
-        let hops = announce.header.hops + 1;
+        let Some(hops) = announce.header.hops.checked_add(1) else {
+            return;
+        };
 
         if let Some(existing_entry) = self.map.get(&announce.destination) {
             if hops > existing_entry.hops {
@@ -116,6 +118,10 @@ self_referential_transport={}",
             None => return (*original_packet, None),
         };
 
+        let Some(hops) = original_packet.header.hops.checked_add(1) else {
+            return (*original_packet, None);
+        };
+
         let (header_type, propagation_type, transport) = if entry.hops > 1 {
             (
                 HeaderType::Type2,
@@ -132,7 +138,7 @@ self_referential_transport={}",
                     ifac_flag: IfacFlag::Open,
                     header_type,
                     propagation_type,
-                    hops: original_packet.header.hops + 1,
+                    hops,
                     .. original_packet.header
                 },
                 ifac: None,
@@ -288,5 +294,45 @@ mod tests {
         assert_eq!(forwarded.header.propagation_type, PropagationType::Transport);
         assert_eq!(forwarded.header.hops, 1);
         assert_eq!(forwarded.transport, Some(transport));
+    }
+
+    #[test]
+    fn forwarding_max_hop_packet_does_not_overflow() {
+        let destination = AddressHash::new_from_slice(b"direct-destination");
+        let iface = AddressHash::new_from_slice(b"direct-iface");
+        let mut table = PathTable::new(false);
+
+        let announce = Packet {
+            header: Header {
+                packet_type: PacketType::Announce,
+                destination_type: DestinationType::Single,
+                hops: 0,
+                ..Default::default()
+            },
+            destination,
+            transport: None,
+            context: PacketContext::None,
+            ifac: None,
+            data: Default::default(),
+        };
+        table.handle_announce(&announce, None, iface);
+
+        let original = Packet {
+            header: Header {
+                packet_type: PacketType::Data,
+                destination_type: DestinationType::Single,
+                hops: u8::MAX,
+                ..Default::default()
+            },
+            destination,
+            transport: None,
+            context: PacketContext::None,
+            ifac: None,
+            data: Default::default(),
+        };
+
+        let (_, forwarded_iface) = table.handle_inbound_packet(&original, None);
+
+        assert_eq!(forwarded_iface, None);
     }
 }
