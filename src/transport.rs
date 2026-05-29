@@ -12,6 +12,7 @@ use path_requests::PathRequests;
 use path_requests::TagBytes;
 use path_table::PathTable;
 use rand_core::OsRng;
+use rmpv::Value;
 use reverse_table::ReverseTable;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -473,7 +474,18 @@ impl Transport {
     }
 
     pub async fn find_out_link(&self, link_id: &AddressHash) -> Option<Arc<Mutex<Link>>> {
-        self.handler.lock().await.out_links.get(link_id).cloned()
+        let links = {
+            let handler = self.handler.lock().await;
+            handler.out_links.values().cloned().collect::<Vec<_>>()
+        };
+
+        for link in links {
+            if *link.lock().await.id() == *link_id {
+                return Some(link);
+            }
+        }
+
+        None
     }
 
     pub async fn find_in_link(&self, link_id: &AddressHash) -> Option<Arc<Mutex<Link>>> {
@@ -537,6 +549,50 @@ impl Transport {
             log::warn!("tp({}): close link {link_id} not found", self.name)
         }
         Ok(())
+    }
+
+    pub async fn link_identify(
+        &self,
+        link_id: LinkId,
+        identity: &PrivateIdentity,
+    ) -> Result<(), RnsError> {
+        let link = self.find_link(&link_id).await.ok_or(RnsError::InvalidArgument)?;
+        let packet = link.lock().await.identify_packet(identity)?;
+        self.send_packet(packet).await;
+        Ok(())
+    }
+
+    pub async fn link_request(
+        &self,
+        link_id: LinkId,
+        path: &str,
+        data: Value,
+    ) -> Result<AddressHash, RnsError> {
+        let link = self.find_link(&link_id).await.ok_or(RnsError::InvalidArgument)?;
+        let packet = link.lock().await.request_packet(path, data)?;
+        let request_id = AddressHash::new_from_hash(&packet.hash());
+        self.send_packet(packet).await;
+        Ok(request_id)
+    }
+
+    pub async fn link_response(
+        &self,
+        link_id: LinkId,
+        request_id: AddressHash,
+        data: Value,
+    ) -> Result<(), RnsError> {
+        let link = self.find_link(&link_id).await.ok_or(RnsError::InvalidArgument)?;
+        let packet = link.lock().await.response_packet(request_id, data)?;
+        self.send_packet(packet).await;
+        Ok(())
+    }
+
+    async fn find_link(&self, link_id: &LinkId) -> Option<Arc<Mutex<Link>>> {
+        if let Some(link) = self.find_in_link(link_id).await {
+            Some(link)
+        } else {
+            self.find_out_link(link_id).await
+        }
     }
 
     pub async fn request_path(

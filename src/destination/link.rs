@@ -1,10 +1,11 @@
 use std::{
     cmp::min,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use ed25519_dalek::{Signature, SigningKey, Verifier, PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH};
 use rand_core::OsRng;
+use rmpv::{decode::read_value, encode::write_value, Value};
 use sha2::Digest;
 use x25519_dalek::StaticSecret;
 
@@ -75,14 +76,15 @@ impl LinkPayload {
 
     pub fn new_from_vec(data: &Vec<u8>) -> Self {
         let mut buffer = [0u8; PACKET_MDU];
+        let len = min(buffer.len(), data.len());
 
-        for i in 0..min(buffer.len(), data.len()) {
+        for i in 0..len {
             buffer[i] = data[i];
         }
 
         Self {
             buffer,
-            len: data.len(),
+            len,
         }
     }
 
@@ -129,8 +131,25 @@ pub enum LinkHandleResult {
 pub enum LinkEvent {
     Activated,
     Data(LinkPayload),
+    RemoteIdentified(Identity),
+    Request(LinkRequest),
+    Response(LinkResponse),
     Proof(Hash),
     Closed,
+}
+
+#[derive(Clone)]
+pub struct LinkRequest {
+    pub request_id: AddressHash,
+    pub path_hash: AddressHash,
+    pub requested_at: f64,
+    pub data: Value,
+}
+
+#[derive(Clone)]
+pub struct LinkResponse {
+    pub request_id: AddressHash,
+    pub data: Value,
 }
 
 #[derive(Clone)]
@@ -302,6 +321,55 @@ impl Link {
                     log::error!("link({}): can't decrypt packet", self.id);
                 }
             }
+            PacketContext::LinkIdentify => if !out_link {
+                let mut buffer = [0u8; PACKET_MDU];
+                if let Ok(plain_text) = self.decrypt(packet.data.as_slice(), &mut buffer[..]) {
+                    match self.validate_link_identify(plain_text) {
+                        Ok(identity) => {
+                            self.request_time = Instant::now();
+                            self.post_event(LinkEvent::RemoteIdentified(identity));
+                        }
+                        Err(err) => {
+                            log::warn!("link({}): invalid link identify packet: {err:?}", self.id);
+                        }
+                    }
+                } else {
+                    log::error!("link({}): can't decrypt link identify packet", self.id);
+                }
+            }
+            PacketContext::Request => {
+                let mut buffer = [0u8; PACKET_MDU];
+                if let Ok(plain_text) = self.decrypt(packet.data.as_slice(), &mut buffer[..]) {
+                    let request_id = AddressHash::new_from_hash(&packet.hash());
+                    match decode_link_request(plain_text, request_id) {
+                        Ok(request) => {
+                            self.request_time = Instant::now();
+                            self.post_event(LinkEvent::Request(request));
+                        }
+                        Err(err) => {
+                            log::warn!("link({}): invalid request packet: {err:?}", self.id);
+                        }
+                    }
+                } else {
+                    log::error!("link({}): can't decrypt request packet", self.id);
+                }
+            }
+            PacketContext::Response => {
+                let mut buffer = [0u8; PACKET_MDU];
+                if let Ok(plain_text) = self.decrypt(packet.data.as_slice(), &mut buffer[..]) {
+                    match decode_link_response(plain_text) {
+                        Ok(response) => {
+                            self.request_time = Instant::now();
+                            self.post_event(LinkEvent::Response(response));
+                        }
+                        Err(err) => {
+                            log::warn!("link({}): invalid response packet: {err:?}", self.id);
+                        }
+                    }
+                } else {
+                    log::error!("link({}): can't decrypt response packet", self.id);
+                }
+            }
             PacketContext::KeepAlive => {
                 if packet.data.len() >= 1 && packet.data.as_slice()[0] == 0xFF {
                     self.request_time = Instant::now();
@@ -399,6 +467,10 @@ impl Link {
     }
 
     pub fn data_packet(&self, data: &[u8]) -> Result<Packet, RnsError> {
+        self.encrypted_data_packet(data, PacketContext::None)
+    }
+
+    fn encrypted_data_packet(&self, data: &[u8], context: PacketContext) -> Result<Packet, RnsError> {
         if self.status != LinkStatus::Active && self.status != LinkStatus::Stale {
             log::warn!("link: can't create data packet for closed link");
             return Err(RnsError::LinkClosed)
@@ -422,9 +494,60 @@ impl Link {
             ifac: None,
             destination: self.id,
             transport: None,
-            context: PacketContext::None,
+            context,
             data: packet_data,
         })
+    }
+
+    pub fn identify_packet(&self, identity: &PrivateIdentity) -> Result<Packet, RnsError> {
+        let mut signed_data = [0u8; ADDRESS_HASH_SIZE + PUBLIC_KEY_LENGTH * 2];
+        let signed_data_len = {
+            let mut output = OutputBuffer::new(&mut signed_data);
+            output.write(self.id.as_slice())?;
+            output.write(identity.as_identity().public_key.as_bytes())?;
+            output.write(identity.as_identity().verifying_key.as_bytes())?;
+            output.offset()
+        };
+
+        let signature = identity.sign(&signed_data[..signed_data_len]);
+
+        let mut plaintext = [0u8; PUBLIC_KEY_LENGTH * 2 + SIGNATURE_LENGTH];
+        let plaintext_len = {
+            let mut output = OutputBuffer::new(&mut plaintext);
+            output.write(identity.as_identity().public_key.as_bytes())?;
+            output.write(identity.as_identity().verifying_key.as_bytes())?;
+            output.write(&signature.to_bytes())?;
+            output.offset()
+        };
+
+        self.encrypted_data_packet(&plaintext[..plaintext_len], PacketContext::LinkIdentify)
+    }
+
+    pub fn request_packet(&self, path: &str, data: Value) -> Result<Packet, RnsError> {
+        let request = Value::Array(vec![
+            Value::F64(now_seconds()),
+            Value::Binary(AddressHash::new_from_slice(path.as_bytes()).as_slice().to_vec()),
+            data,
+        ]);
+        let packed_request = encode_msgpack(&request)?;
+        if packed_request.len() > PACKET_MDU {
+            return Err(RnsError::OutOfMemory);
+        }
+
+        self.encrypted_data_packet(&packed_request, PacketContext::Request)
+    }
+
+    pub fn response_packet(&self, request_id: AddressHash, data: Value) -> Result<Packet, RnsError> {
+        let response = Value::Array(vec![
+            Value::Binary(request_id.as_slice().to_vec()),
+            data,
+        ]);
+        let packed_response = encode_msgpack(&response)?;
+        if packed_response.len() > PACKET_MDU {
+            return Err(RnsError::OutOfMemory);
+        }
+
+        self.encrypted_data_packet(&packed_response, PacketContext::Response)
     }
 
     pub fn keep_alive_packet(&self, data: u8) -> Packet {
@@ -535,6 +658,33 @@ impl Link {
             address_hash: self.destination.address_hash,
             event,
         });
+    }
+
+    fn validate_link_identify(&self, plaintext: &[u8]) -> Result<Identity, RnsError> {
+        const PUBLIC_IDENTITY_LEN: usize = PUBLIC_KEY_LENGTH * 2;
+        const IDENTIFY_LEN: usize = PUBLIC_IDENTITY_LEN + SIGNATURE_LENGTH;
+
+        if plaintext.len() != IDENTIFY_LEN {
+            return Err(RnsError::PacketError);
+        }
+
+        let identity = Identity::new_from_slices(
+            &plaintext[..PUBLIC_KEY_LENGTH],
+            &plaintext[PUBLIC_KEY_LENGTH..PUBLIC_IDENTITY_LEN],
+        );
+        let signature = Signature::from_slice(&plaintext[PUBLIC_IDENTITY_LEN..IDENTIFY_LEN])
+            .map_err(|_| RnsError::PacketError)?;
+
+        let mut signed_data = [0u8; ADDRESS_HASH_SIZE + PUBLIC_IDENTITY_LEN];
+        let signed_data_len = {
+            let mut output = OutputBuffer::new(&mut signed_data);
+            output.write(self.id.as_slice())?;
+            output.write(&plaintext[..PUBLIC_IDENTITY_LEN])?;
+            output.offset()
+        };
+
+        identity.verify(&signed_data[..signed_data_len], &signature)?;
+        Ok(identity)
     }
 
     pub(crate) fn teardown(&mut self) -> Result<Option<Packet>, RnsError> {
@@ -659,9 +809,65 @@ fn validate_message_proof(
     }
 }
 
+fn now_seconds() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_secs_f64()
+}
+
+fn encode_msgpack(value: &Value) -> Result<Vec<u8>, RnsError> {
+    let mut out = Vec::new();
+    write_value(&mut out, value).map_err(|_| RnsError::InvalidArgument)?;
+    Ok(out)
+}
+
+fn decode_link_request(data: &[u8], request_id: AddressHash) -> Result<LinkRequest, RnsError> {
+    let value = read_value(&mut &data[..]).map_err(|_| RnsError::PacketError)?;
+    let values = value.as_array().ok_or(RnsError::PacketError)?;
+    if values.len() != 3 {
+        return Err(RnsError::PacketError);
+    }
+
+    let requested_at = values[0].as_f64().ok_or(RnsError::PacketError)?;
+    let path_hash = read_address_hash(&values[1])?;
+
+    Ok(LinkRequest {
+        request_id,
+        path_hash,
+        requested_at,
+        data: values[2].clone(),
+    })
+}
+
+fn decode_link_response(data: &[u8]) -> Result<LinkResponse, RnsError> {
+    let value = read_value(&mut &data[..]).map_err(|_| RnsError::PacketError)?;
+    let values = value.as_array().ok_or(RnsError::PacketError)?;
+    if values.len() != 2 {
+        return Err(RnsError::PacketError);
+    }
+
+    Ok(LinkResponse {
+        request_id: read_address_hash(&values[0])?,
+        data: values[1].clone(),
+    })
+}
+
+fn read_address_hash(value: &Value) -> Result<AddressHash, RnsError> {
+    let bytes = value.as_slice().ok_or(RnsError::PacketError)?;
+    if bytes.len() != ADDRESS_HASH_SIZE {
+        return Err(RnsError::PacketError);
+    }
+
+    let mut hash = [0u8; ADDRESS_HASH_SIZE];
+    hash.copy_from_slice(bytes);
+    Ok(AddressHash::new(hash))
+}
+
 #[cfg(test)]
 mod tests {
     use ed25519_dalek::SigningKey;
+    use rmpv::Value;
     use x25519_dalek::StaticSecret;
 
     use crate::destination::{DestinationName, SingleInputDestination};
@@ -671,7 +877,7 @@ mod tests {
     use crate::serde::Serialize;
     use crate::test_vectors;
 
-    use super::Link;
+    use super::{Link, LinkEvent};
 
     #[test]
     fn prove_emits_lrproof_with_link_destination_type() {
@@ -704,5 +910,96 @@ mod tests {
             proof_buffer.as_slice(),
             test_vectors::decode_hex(test_vectors::LRPROOF_PACKET_HEX).as_slice()
         );
+    }
+
+    fn create_active_link_pair() -> (
+        Link,
+        Link,
+        tokio::sync::broadcast::Receiver<super::LinkEventData>,
+        tokio::sync::broadcast::Receiver<super::LinkEventData>,
+    ) {
+        let identity = PrivateIdentity::new_from_name("link owner");
+        let destination = SingleInputDestination::new(
+            identity,
+            DestinationName::new("example_utilities", "link.requests"),
+        );
+        let (out_event_tx, mut out_event_rx) = tokio::sync::broadcast::channel(8);
+        let (in_event_tx, mut in_event_rx) = tokio::sync::broadcast::channel(8);
+
+        let mut out_link = Link::new(destination.desc, out_event_tx);
+        let link_request = out_link.request();
+        let mut in_link = Link::new_from_request(
+            &link_request,
+            destination.sign_key().clone(),
+            destination.desc,
+            in_event_tx,
+        )
+        .expect("input link");
+        let proof = in_link.prove();
+        match out_link.handle_packet(&proof, true) {
+            super::LinkHandleResult::Activated => {}
+            _ => unreachable!("link proof should activate output link"),
+        }
+        let _ = in_event_rx.try_recv();
+        let _ = out_event_rx.try_recv();
+
+        (out_link, in_link, out_event_rx, in_event_rx)
+    }
+
+    #[test]
+    fn link_identify_emits_remote_identity() {
+        let (out_link, mut in_link, _out_events, mut in_events) = create_active_link_pair();
+        let remote_identity = PrivateIdentity::new_from_name("lxmf propagation peer");
+        let identify = out_link
+            .identify_packet(&remote_identity)
+            .expect("identify packet");
+
+        in_link.handle_packet(&identify, false);
+
+        let event = in_events.try_recv().expect("identity event");
+        match event.event {
+            LinkEvent::RemoteIdentified(identity) => {
+                assert_eq!(identity.address_hash, *remote_identity.address_hash());
+            }
+            _ => unreachable!("unexpected link event"),
+        }
+    }
+
+    #[test]
+    fn link_request_and_response_emit_events() {
+        let (mut out_link, mut in_link, mut out_events, mut in_events) = create_active_link_pair();
+        let request = out_link
+            .request_packet("/offer", Value::Array(vec![Value::from(1), Value::from("abc")]))
+            .expect("request packet");
+        let request_id = AddressHash::new_from_hash(&request.hash());
+
+        in_link.handle_packet(&request, false);
+
+        let event = in_events.try_recv().expect("request event");
+        match event.event {
+            LinkEvent::Request(request) => {
+                assert_eq!(request.request_id, request_id);
+                assert_eq!(request.path_hash, AddressHash::new_from_slice(b"/offer"));
+                assert_eq!(
+                    request.data,
+                    Value::Array(vec![Value::from(1), Value::from("abc")])
+                );
+            }
+            _ => unreachable!("unexpected link event"),
+        }
+
+        let response = in_link
+            .response_packet(request_id, Value::from(true))
+            .expect("response packet");
+        out_link.handle_packet(&response, true);
+
+        let event = out_events.try_recv().expect("response event");
+        match event.event {
+            LinkEvent::Response(response) => {
+                assert_eq!(response.request_id, request_id);
+                assert_eq!(response.data, Value::from(true));
+            }
+            _ => unreachable!("unexpected link event"),
+        }
     }
 }
